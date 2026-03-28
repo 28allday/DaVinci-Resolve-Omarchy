@@ -1,5 +1,13 @@
 # DaVinci Resolve - Omarchy
 
+## Video Guide
+
+<p align="center">
+  <a href="https://youtu.be/VS7zUWMPsLY">
+    <img src="https://img.youtube.com/vi/VS7zUWMPsLY/0.jpg" width="700">
+  </a>
+</p>
+
 Install [DaVinci Resolve](https://www.blackmagicdesign.com/products/davinciresolve) on [Omarchy](https://omarchy.com) (Arch Linux + Hyprland) with NVIDIA GPU support.
 
 Handles all the compatibility quirks of running Resolve on Arch Linux — library conflicts, XWayland setup, RPATH patching, and legacy library shims — so you don't have to.
