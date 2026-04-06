@@ -28,7 +28,7 @@ Handles all the compatibility quirks of running Resolve on Arch Linux — librar
 
 2. **Run the installer**:
 ```bash
-git clone https://github.com/28allday/DaVinci-Resolve-Omarchy.git
+git clone https://git.no-signal.uk/nosignal/DaVinci-Resolve-Omarchy.git
 cd DaVinci-Resolve-Omarchy
 chmod +x Omarchy_resolve_v2.sh
 ./Omarchy_resolve_v2.sh
