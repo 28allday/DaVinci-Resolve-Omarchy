@@ -502,8 +502,10 @@ else
   # Bridge snd-aloop capture → default sink so monitor audio is audible.
   # Without this, Resolve writes to the loopback and the audio goes nowhere
   # (loopback is a black hole until something captures the other side).
-  # The bridge is a PipeWire loopback module loaded from user config; it
-  # tracks the default sink so headphone/HDMI switching keeps working.
+  # The bridge is a PipeWire loopback module loaded from user config; its
+  # playback side uses media.class = Stream/Output/Audio so it follows the
+  # current system default sink — headphone/HDMI/analog switching keeps
+  # working without editing this file.
   ALOOP_BRIDGE_DIR="${HOME}/.config/pipewire/pipewire.conf.d"
   ALOOP_BRIDGE_FILE="${ALOOP_BRIDGE_DIR}/50-resolve-aloop-bridge.conf"
   mkdir -p "${ALOOP_BRIDGE_DIR}"
@@ -532,13 +534,57 @@ context.modules = [
 ]
 EOF
     log "  Wrote ${ALOOP_BRIDGE_FILE} (PipeWire loopback bridge)"
-    # Reload user PipeWire services so the new conf is picked up
-    if systemctl --user is-active --quiet pipewire 2>/dev/null; then
-      systemctl --user restart pipewire pipewire-pulse wireplumber 2>/dev/null || true
-      log "  Reloaded user PipeWire services"
-    fi
   else
     log "  ${ALOOP_BRIDGE_FILE} already in place"
+  fi
+
+  # Wireplumber rule: keep aloop OUT of the default-sink rotation.
+  # Wireplumber's auto-default algorithm promotes whichever sink is RUNNING
+  # — and aloop is RUNNING precisely while Resolve plays audio. Without
+  # this rule, aloop becomes default mid-session, the bridge's "send to
+  # default sink" output lands back in aloop, and monitor audio loops onto
+  # itself (renders still complete, but you hear nothing during playback).
+  # Lowering priority + dont-fallback / disable-fallback excludes aloop
+  # from default selection without disabling the device.
+  WPRULE_DIR="${HOME}/.config/wireplumber/wireplumber.conf.d"
+  WPRULE_FILE="${WPRULE_DIR}/51-resolve-aloop-no-default.conf"
+  mkdir -p "${WPRULE_DIR}"
+  if [[ ! -f "${WPRULE_FILE}" ]]; then
+    cat > "${WPRULE_FILE}" <<'EOF'
+# DaVinci Resolve aloop — keep snd-aloop out of the default-sink rotation.
+# Managed by Omarchy_resolve_v2.sh. Without this, wireplumber promotes
+# aloop to default whenever Resolve makes it RUNNING, and the bridge loops
+# audio back into aloop instead of reaching real hardware. Setting both
+# dont-fallback (older) and disable-fallback (newer) covers wireplumber
+# 0.4 and 0.5+.
+monitor.alsa.rules = [
+  {
+    matches = [
+      { node.name = "alsa_output.platform-snd_aloop.0.analog-stereo" }
+      { node.name = "alsa_input.platform-snd_aloop.0.analog-stereo" }
+    ]
+    actions = {
+      update-props = {
+        priority.session      = 0
+        priority.driver       = 0
+        node.dont-fallback    = true
+        node.disable-fallback = true
+      }
+    }
+  }
+]
+EOF
+    log "  Wrote ${WPRULE_FILE} (wireplumber default-sink exclusion)"
+  else
+    log "  ${WPRULE_FILE} already in place"
+  fi
+
+  # Reload user PipeWire + wireplumber so the new configs are picked up.
+  # Restart wireplumber FIRST so its monitor reapplies the alsa rule when
+  # pipewire republishes the aloop nodes.
+  if systemctl --user is-active --quiet pipewire 2>/dev/null; then
+    systemctl --user restart wireplumber pipewire pipewire-pulse 2>/dev/null || true
+    log "  Reloaded user wireplumber + PipeWire services"
   fi
 fi
 

@@ -123,11 +123,18 @@ proceeds normally. The script:
 - Writes `/etc/modules-load.d/snd-aloop.conf` so it autoloads at boot
 - Writes a PipeWire loopback bridge at
   `~/.config/pipewire/pipewire.conf.d/50-resolve-aloop-bridge.conf` so
-  monitor audio routes from the loopback's capture side to the system
-  default sink (without it, Resolve renders fine but you hear nothing
-  during playback; headphone/HDMI sink switching keeps working through
-  the bridge)
-- Restarts user PipeWire services so the bridge loads immediately
+  monitor audio routes from the loopback's capture side to the current
+  system default sink (without it, Resolve renders fine but you hear
+  nothing during playback; headphone/HDMI sink switching keeps working
+  through the bridge)
+- Writes a Wireplumber rule at
+  `~/.config/wireplumber/wireplumber.conf.d/51-resolve-aloop-no-default.conf`
+  that excludes the aloop card from default-sink selection — without this,
+  Wireplumber would promote aloop to default whenever Resolve plays audio
+  (because aloop is RUNNING), and the bridge would loop audio back into
+  aloop instead of your real hardware
+- Restarts user Wireplumber + PipeWire services so the configs load
+  immediately
 
 Set `RESOLVE_NO_ALOOP=1` to skip this entirely (useful if you have a
 dedicated audio interface Resolve already uses cleanly).
@@ -255,23 +262,35 @@ clip codec with `ffprobe` — ProRes RAW will hang silently on Linux without
 Apple's ProRes RAW SDK plugins, which is a separate issue from this audio
 fix.
 
-### No audio during playback / monitor sink switches don't work
+### No audio during playback / sink keeps flipping to "Loopback"
 
-The PipeWire loopback bridge at
-`~/.config/pipewire/pipewire.conf.d/50-resolve-aloop-bridge.conf` routes
-the snd-aloop capture side to your default sink. If headphone/HDMI
-switching stops working for Resolve playback, restart user PipeWire
-services:
+If your system default sink keeps switching to "Loopback Analog Stereo"
+the moment Resolve starts playing, the wireplumber exclusion rule isn't
+in effect. Confirm the rule file exists:
 
 ```bash
-systemctl --user restart pipewire pipewire-pulse wireplumber
+cat ~/.config/wireplumber/wireplumber.conf.d/51-resolve-aloop-no-default.conf
 ```
 
-To remove the bridge entirely:
+If absent, re-run the installer or pin your real sink manually:
+
+```bash
+pactl set-default-sink <your-real-sink-name>      # e.g. alsa_output.pci-0000_01_00.1.hdmi-stereo
+```
+
+If headphone/HDMI switching stops working for Resolve playback, restart
+the user audio stack (wireplumber first):
+
+```bash
+systemctl --user restart wireplumber pipewire pipewire-pulse
+```
+
+To remove the bridge + rule entirely:
 
 ```bash
 rm ~/.config/pipewire/pipewire.conf.d/50-resolve-aloop-bridge.conf
-systemctl --user restart pipewire pipewire-pulse wireplumber
+rm ~/.config/wireplumber/wireplumber.conf.d/51-resolve-aloop-no-default.conf
+systemctl --user restart wireplumber pipewire pipewire-pulse
 ```
 
 ### Missing library errors
@@ -327,10 +346,11 @@ sudo rm -f /usr/lib/udev/rules.d/99-BlackmagicDevices.rules
 sudo rm -f /usr/lib/udev/rules.d/99-ResolveKeyboardHID.rules
 sudo rm -f /usr/lib/udev/rules.d/99-DavinciPanel.rules
 
-# Remove the snd-aloop autoload entry + PipeWire bridge (optional)
+# Remove the snd-aloop autoload entry + PipeWire bridge + wireplumber rule
 sudo rm -f /etc/modules-load.d/snd-aloop.conf
 rm -f ~/.config/pipewire/pipewire.conf.d/50-resolve-aloop-bridge.conf
-systemctl --user restart pipewire pipewire-pulse wireplumber
+rm -f ~/.config/wireplumber/wireplumber.conf.d/51-resolve-aloop-no-default.conf
+systemctl --user restart wireplumber pipewire pipewire-pulse
 
 # Remove user data (WARNING: deletes all projects and settings)
 rm -rf ~/.local/share/DaVinciResolve
