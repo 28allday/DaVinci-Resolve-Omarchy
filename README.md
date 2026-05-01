@@ -97,6 +97,41 @@ Resolve doesn't support native Wayland. The wrapper script (`resolve-nvidia-open
 - Installs udev rules for Blackmagic hardware (capture cards, control panels)
 - Points all launchers at the XWayland wrapper
 
+### 7. Audio Backend Fix (DeckLink → ALSA + `snd-aloop`)
+
+Two issues are fixed automatically:
+
+**Default audio backend.** Resolve's shipped `default-config.dat` sets
+`Local.Audio.Type = DeckLink`, which causes Resolve to abort on first launch
+on systems without a Blackmagic DeckLink capture/playback card. The script
+patches both the system template and any existing user config to use `ALSA`
+(backing up the user config to `config.dat.bak.<timestamp>`).
+
+**Render-blocker hang.** Resolve's audio engine opens raw ALSA hardware
+(`hw:N`) and enumerates every card under `/dev/snd/control*`. When all real
+ALSA cards are owned/contested by PipeWire's session manager, the
+enumeration retries forever — the render queue never spawns the encoder, the
+job sits at "in progress" with growing ETA, no output file appears, and
+nothing useful lands in `ResolveDebug.txt`. `strace` shows tens of thousands
+of `SNDRV_CTL_IOCTL_PCM_INFO` `ENXIO` ioctls per failed render.
+
+The fix is to load the kernel's `snd-aloop` module. PipeWire ignores it (no
+ACP profile, not auto-acquired), so Resolve can fully own it and the render
+proceeds normally. The script:
+
+- Runs `modprobe snd-aloop` for the current session
+- Writes `/etc/modules-load.d/snd-aloop.conf` so it autoloads at boot
+- Writes a PipeWire loopback bridge at
+  `~/.config/pipewire/pipewire.conf.d/50-resolve-aloop-bridge.conf` so
+  monitor audio routes from the loopback's capture side to the system
+  default sink (without it, Resolve renders fine but you hear nothing
+  during playback; headphone/HDMI sink switching keeps working through
+  the bridge)
+- Restarts user PipeWire services so the bridge loads immediately
+
+Set `RESOLVE_NO_ALOOP=1` to skip this entirely (useful if you have a
+dedicated audio interface Resolve already uses cleanly).
+
 ## Files Installed
 
 ### Application
@@ -145,6 +180,18 @@ By default, the script syncs the package database without upgrading. To include 
 RESOLVE_FULL_UPGRADE=1 ./Omarchy_resolve_v2.sh
 ```
 
+### Skip the `snd-aloop` Audio Fix
+
+If you have a dedicated audio interface (e.g. Focusrite Scarlett, MOTU, etc.)
+that Resolve already uses cleanly, you don't need the virtual loopback card:
+
+```bash
+RESOLVE_NO_ALOOP=1 ./Omarchy_resolve_v2.sh
+```
+
+This skips the `modprobe snd-aloop`, the `/etc/modules-load.d/` entry, and
+the PipeWire loopback bridge. The DeckLink → ALSA config patch still runs.
+
 ### Hybrid GPU Laptops (Optimus)
 
 If you have an Intel iGPU + NVIDIA dGPU, edit the wrapper to force Resolve onto the NVIDIA GPU:
@@ -178,6 +225,53 @@ Stale lockfiles from a previous crash. The wrapper clears these automatically, b
 
 ```bash
 rm -f /tmp/qtsingleapp-DaVinci*
+```
+
+### Render queue says "in progress" forever, no output file
+
+This is the audio render-blocker hang — Resolve's audio engine is stuck
+enumerating ALSA cards. Confirm `snd-aloop` is loaded:
+
+```bash
+lsmod | grep snd_aloop
+```
+
+If absent, load it and retry:
+
+```bash
+sudo modprobe snd-aloop
+```
+
+If you ran the installer with `RESOLVE_NO_ALOOP=1` and want to opt back in,
+re-run the installer without that variable, or do it manually:
+
+```bash
+sudo modprobe snd-aloop
+echo 'snd-aloop' | sudo tee /etc/modules-load.d/snd-aloop.conf
+```
+
+If `lsmod` shows `snd_aloop` is loaded but renders still hang, check the
+clip codec with `ffprobe` — ProRes RAW will hang silently on Linux without
+Apple's ProRes RAW SDK plugins, which is a separate issue from this audio
+fix.
+
+### No audio during playback / monitor sink switches don't work
+
+The PipeWire loopback bridge at
+`~/.config/pipewire/pipewire.conf.d/50-resolve-aloop-bridge.conf` routes
+the snd-aloop capture side to your default sink. If headphone/HDMI
+switching stops working for Resolve playback, restart user PipeWire
+services:
+
+```bash
+systemctl --user restart pipewire pipewire-pulse wireplumber
+```
+
+To remove the bridge entirely:
+
+```bash
+rm ~/.config/pipewire/pipewire.conf.d/50-resolve-aloop-bridge.conf
+systemctl --user restart pipewire pipewire-pulse wireplumber
 ```
 
 ### Missing library errors
@@ -232,6 +326,11 @@ sudo rm -f /usr/share/icons/hicolor/256x256/apps/blackmagicraw-speedtest.png
 sudo rm -f /usr/lib/udev/rules.d/99-BlackmagicDevices.rules
 sudo rm -f /usr/lib/udev/rules.d/99-ResolveKeyboardHID.rules
 sudo rm -f /usr/lib/udev/rules.d/99-DavinciPanel.rules
+
+# Remove the snd-aloop autoload entry + PipeWire bridge (optional)
+sudo rm -f /etc/modules-load.d/snd-aloop.conf
+rm -f ~/.config/pipewire/pipewire.conf.d/50-resolve-aloop-bridge.conf
+systemctl --user restart pipewire pipewire-pulse wireplumber
 
 # Remove user data (WARNING: deletes all projects and settings)
 rm -rf ~/.local/share/DaVinciResolve

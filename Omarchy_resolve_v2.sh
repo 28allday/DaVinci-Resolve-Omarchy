@@ -432,9 +432,120 @@ EOF
 update-desktop-database "${HOME}/.local/share/applications" >/dev/null 2>&1 || true
 sudo gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true
 
+# ==================== Audio backend fix (DeckLink → ALSA) ====================
+#
+# Resolve ships with `Local.Audio.Type = DeckLink` as the default in its
+# system-wide config template at /opt/resolve/share/default-config.dat.
+# That's correct for users with a Blackmagic DeckLink capture/playback card,
+# but on systems without one Resolve aborts on first launch. Patch both the
+# template (so future first-launches are correct) and any existing user
+# config (so the current install isn't broken).
+log "Switching Resolve audio backend default from DeckLink to ALSA..."
+TEMPLATE=/opt/resolve/share/default-config.dat
+if [[ -f "${TEMPLATE}" ]] && grep -q '^Local\.Audio\.Type = DeckLink$' "${TEMPLATE}"; then
+  sudo sed -i 's|^Local\.Audio\.Type = DeckLink$|Local.Audio.Type = ALSA|' "${TEMPLATE}"
+  log "  Patched system template ${TEMPLATE}"
+fi
+USER_CFG="${HOME}/.local/share/DaVinciResolve/configs/config.dat"
+if [[ -f "${USER_CFG}" ]] && grep -q '^Local\.Audio\.Type = DeckLink$' "${USER_CFG}"; then
+  cp "${USER_CFG}" "${USER_CFG}.bak.$(date +%s)"
+  sed -i 's|^Local\.Audio\.Type = DeckLink$|Local.Audio.Type = ALSA|' "${USER_CFG}"
+  log "  Patched existing user config ${USER_CFG} (backup .bak.<timestamp> created)"
+fi
+
+# ==================== snd-aloop (the actual render-blocker fix) ====================
+#
+# Resolve's audio engine opens raw ALSA hardware via snd_pcm_open("hw:%d", ...)
+# — it never goes through ALSA's plugin layer (default/pulse/pipewire) and it
+# enumerates EVERY card under /dev/snd/controlC[0-32] looking for a usable PCM.
+# When every real ALSA card on the system is owned/contested by PipeWire's
+# session manager, Resolve's enumeration loops forever, the render queue
+# never spawns the encoder, and the user sees:
+#   - alsa device meters "flickering" in wireplumber (each enumeration cycle
+#     briefly opens controlC*; PipeWire reacts)
+#   - render that "won't start" with no error in ResolveDebug.txt
+# Confirmed via strace: 14000+ SNDRV_CTL_IOCTL_PCM_INFO ENXIO ioctls and
+# 47000+ /dev/snd/controlCN ENOENT opens during the failed render attempt,
+# concentrated AFTER the user clicks Render — i.e. a tight retry loop.
+#
+# THE FIX: load the kernel's snd-aloop module. It exposes a virtual ALSA
+# loopback card that PipeWire ignores (no ACP profile, not auto-acquired).
+# Resolve's enumerator finds it, can fully own it, settles on it, and the
+# render proceeds. Side effect: a "Loopback" device shows up in alsamixer
+# and pavucontrol — harmless.
+#
+# Skipped if RESOLVE_NO_ALOOP=1 (e.g. user already has a dedicated audio
+# interface that Resolve uses). Persistent across reboots via
+# /etc/modules-load.d/.
+if [[ "${RESOLVE_NO_ALOOP:-0}" == "1" ]]; then
+  log "Skipping snd-aloop setup (RESOLVE_NO_ALOOP=1)"
+else
+  log "Setting up snd-aloop (virtual ALSA card so Resolve render can start)..."
+  if ! lsmod | grep -qE '^snd_aloop'; then
+    if sudo modprobe snd-aloop 2>/dev/null; then
+      log "  snd-aloop loaded for the current session"
+    else
+      warn "  modprobe snd-aloop failed — kernel may lack the module."
+      warn "  On Arch this is part of linux/linux-zen/linux-lts; verify: modinfo snd-aloop"
+    fi
+  else
+    log "  snd-aloop already loaded"
+  fi
+  ALOOP_CONF=/etc/modules-load.d/snd-aloop.conf
+  if [[ ! -f "${ALOOP_CONF}" ]] || ! grep -qx 'snd-aloop' "${ALOOP_CONF}" 2>/dev/null; then
+    echo 'snd-aloop' | sudo tee "${ALOOP_CONF}" >/dev/null
+    log "  Wrote ${ALOOP_CONF} (autoloads at boot)"
+  else
+    log "  ${ALOOP_CONF} already configured"
+  fi
+
+  # Bridge snd-aloop capture → default sink so monitor audio is audible.
+  # Without this, Resolve writes to the loopback and the audio goes nowhere
+  # (loopback is a black hole until something captures the other side).
+  # The bridge is a PipeWire loopback module loaded from user config; it
+  # tracks the default sink so headphone/HDMI switching keeps working.
+  ALOOP_BRIDGE_DIR="${HOME}/.config/pipewire/pipewire.conf.d"
+  ALOOP_BRIDGE_FILE="${ALOOP_BRIDGE_DIR}/50-resolve-aloop-bridge.conf"
+  mkdir -p "${ALOOP_BRIDGE_DIR}"
+  if [[ ! -f "${ALOOP_BRIDGE_FILE}" ]]; then
+    cat > "${ALOOP_BRIDGE_FILE}" <<'EOF'
+# DaVinci Resolve aloop monitor bridge — managed by Omarchy_resolve_v2.sh
+# Bridges snd-aloop's capture side to the system default sink so Resolve's
+# monitor audio is audible while editing. Without this, Resolve renders fine
+# but you hear nothing during playback. Remove this file + restart PipeWire
+# to disable.
+context.modules = [
+  { name = libpipewire-module-loopback
+    args = {
+      node.description = "DaVinci Resolve aloop monitor bridge"
+      capture.props = {
+        node.name = "resolve-aloop-capture"
+        target.object = "alsa_input.platform-snd_aloop.0.analog-stereo"
+        node.passive = true
+      }
+      playback.props = {
+        node.name = "resolve-aloop-playback"
+        media.class = "Stream/Output/Audio"
+      }
+    }
+  }
+]
+EOF
+    log "  Wrote ${ALOOP_BRIDGE_FILE} (PipeWire loopback bridge)"
+    # Reload user PipeWire services so the new conf is picked up
+    if systemctl --user is-active --quiet pipewire 2>/dev/null; then
+      systemctl --user restart pipewire pipewire-pulse wireplumber 2>/dev/null || true
+      log "  Reloaded user PipeWire services"
+    fi
+  else
+    log "  ${ALOOP_BRIDGE_FILE} already in place"
+  fi
+fi
+
 echo
 echo "✅ DaVinci Resolve installed to /opt/resolve"
-echo "   (vendor libc++ kept; libcrypt.so.1 ensured)"
+echo "   (vendor libc++ kept; libcrypt.so.1 ensured; audio backend → ALSA + snd-aloop)"
 echo "   Launch from your app menu, or run: resolve-nvidia-open"
+echo "   Skip snd-aloop module setup:  RESOLVE_NO_ALOOP=1 ./Omarchy_resolve_v2.sh"
 echo "   Logs: ~/.local/share/DaVinciResolve/logs/ResolveDebug.txt"
 echo
