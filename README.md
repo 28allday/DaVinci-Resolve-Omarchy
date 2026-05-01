@@ -16,6 +16,10 @@ Handles all the compatibility quirks of running Resolve on Arch Linux — librar
 
 - **OS**: [Omarchy](https://omarchy.com) (Arch Linux)
 - **GPU**: NVIDIA with proprietary drivers installed and working
+- **Audio stack**: PipeWire + Wireplumber **0.5 or newer** (Omarchy default)
+  — the audio fix uses the SPA-JSON rule format introduced in 0.5
+- **Kernel**: Stock Arch kernel (or any with `snd-aloop` available — verify
+  with `modinfo snd-aloop`)
 - **Disk space**: ~10GB free in ~/Downloads for extraction (temporary)
 - **DaVinci Resolve ZIP**: Downloaded from Blackmagic's website
 
@@ -97,9 +101,12 @@ Resolve doesn't support native Wayland. The wrapper script (`resolve-nvidia-open
 - Installs udev rules for Blackmagic hardware (capture cards, control panels)
 - Points all launchers at the XWayland wrapper
 
-### 7. Audio Backend Fix (DeckLink → ALSA + `snd-aloop`)
+### 7. Audio Backend Fix (DeckLink → ALSA + `snd-aloop` + Wireplumber rule)
 
-Two issues are fixed automatically:
+Three pieces are needed for Resolve audio to actually work — all three are
+applied automatically. Skipping any one of them leaves a different failure
+mode visible (Resolve aborts on first launch / renders hang forever / monitor
+audio loops onto itself).
 
 **Default audio backend.** Resolve's shipped `default-config.dat` sets
 `Local.Audio.Type = DeckLink`, which causes Resolve to abort on first launch

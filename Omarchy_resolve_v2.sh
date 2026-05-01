@@ -554,9 +554,10 @@ EOF
 # DaVinci Resolve aloop — keep snd-aloop out of the default-sink rotation.
 # Managed by Omarchy_resolve_v2.sh. Without this, wireplumber promotes
 # aloop to default whenever Resolve makes it RUNNING, and the bridge loops
-# audio back into aloop instead of reaching real hardware. Setting both
-# dont-fallback (older) and disable-fallback (newer) covers wireplumber
-# 0.4 and 0.5+.
+# audio back into aloop instead of reaching real hardware. SPA-JSON rule
+# format requires wireplumber 0.5+ (Omarchy ships 0.5.x). Setting both
+# node.dont-fallback and node.disable-fallback covers minor key renames
+# across the 0.5.x series.
 monitor.alsa.rules = [
   {
     matches = [
